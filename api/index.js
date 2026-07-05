@@ -1,0 +1,287 @@
+// api/index.js - BRONX OSINT V15 ULTRA - PROTECTED API + IMPORT/EXPORT
+const express = require('express');
+const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
+const app = express();
+
+const REAL_API_BASE = 'https://osint-bronx-ultra-2-0.onrender.com/api';
+const REAL_API_KEY = 'bot-new';
+
+// 🔥 FAKE IP POOL
+const FAKE_IPS = [
+    '103.15.224.' + Math.floor(Math.random()*255), '117.98.45.' + Math.floor(Math.random()*255),
+    '152.67.89.' + Math.floor(Math.random()*255), '157.34.123.' + Math.floor(Math.random()*255),
+    '182.76.55.' + Math.floor(Math.random()*255), '223.188.12.' + Math.floor(Math.random()*255),
+    '45.112.67.' + Math.floor(Math.random()*255), '51.89.234.' + Math.floor(Math.random()*255),
+    '77.45.178.' + Math.floor(Math.random()*255), '91.234.56.' + Math.floor(Math.random()*255),
+    '176.32.90.' + Math.floor(Math.random()*255), '198.54.123.' + Math.floor(Math.random()*255),
+];
+function getFakeIP() { return FAKE_IPS[Math.floor(Math.random() * FAKE_IPS.length)]; }
+
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'BRONX_ULTRA';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'king5';
+const MASTER_API_KEY = process.env.MASTER_API_KEY || 'BRONX_MASTER_' + Math.random().toString(36).substring(2,10).toUpperCase();
+
+const DATA_DIR = process.env.RENDER_DATA_DIR || '/tmp';
+const DATA_FILE = path.join(DATA_DIR, 'bronx_v15_data.json');
+
+let keyStorage = {};
+let customAPIs = [];
+let requestLogs = [];
+let adminSessions = {};
+let permanentTokens = {};
+let bannedIPs = [];
+let cooldownTimers = {};
+let ipMinuteCount = {};
+let protectedData = {};
+let dailyLimits = {};
+
+// ========== STORAGE ==========
+function saveToDisk(){try{const ks={};Object.entries(keyStorage).forEach(([k,v])=>{if(!v._hardcoded)ks[k]=v});const d={keys:ks,apis:customAPIs,tokens:permanentTokens,banned:bannedIPs,logs:requestLogs.slice(-500),protected:protectedData};fs.writeFileSync(DATA_FILE,JSON.stringify(d,null,2))}catch(e){}}
+function loadFromDisk(){try{if(fs.existsSync(DATA_FILE)){const d=JSON.parse(fs.readFileSync(DATA_FILE,'utf8'));if(d.keys)Object.entries(d.keys).forEach(([k,v])=>{keyStorage[k]=v});if(d.apis?.length>0)customAPIs=d.apis;if(d.tokens){permanentTokens=d.tokens;Object.entries(permanentTokens).forEach(([t])=>{adminSessions[t]={expiresAt:Date.now()+(365*24*60*60*1000),permanent:true}})}if(d.banned)bannedIPs=d.banned;if(d.logs)requestLogs=d.logs;if(d.protected)protectedData=d.protected;return true}}catch(e){}return false}
+function scheduleSave(){setTimeout(()=>saveToDisk(),2000)}setInterval(()=>scheduleSave(),5*60*1000);
+
+// ========== HELPERS ==========
+function getIndiaTime(){return new Date(new Date().getTime()+(5.5*60*60*1000))}
+function getIndiaDate(){return getIndiaTime().toISOString().split('T')[0]}
+function getIndiaDateTime(){return getIndiaTime().toISOString().replace('T',' ').substring(0,19)}
+function isKeyExpired(d){if(!d||d==='LIFETIME')return false;return getIndiaTime()>new Date(d)}
+function parseExpiryDate(s){if(!s||s==='LIFETIME')return null;const p=s.split('-');if(p.length===3)return p[0].length===4?new Date(+p[0],+p[1]-1,+p[2],23,59,59):new Date(+p[2],+p[1]-1,+p[0],23,59,59);const d=new Date(s);return isNaN(d.getTime())?null:d}
+function checkCooldown(k){const kd=keyStorage[k];if(!kd||!kd.cooldown)return{allowed:true};const n=Date.now();if(cooldownTimers[k]&&(n-cooldownTimers[k])<(kd.cooldown*1000))return{allowed:false,remaining:Math.ceil((kd.cooldown*1000-(n-cooldownTimers[k]))/1000)};cooldownTimers[k]=n;return{allowed:true}}
+function checkDailyLimit(k){const kd=keyStorage[k];if(!kd||!kd.dailyLimit)return{allowed:true};const today=getIndiaDate();const dk=k+'_'+today;if(!dailyLimits[dk])dailyLimits[dk]=0;if(dailyLimits[dk]>=kd.dailyLimit)return{allowed:false,remaining:0,message:`🔴 Daily Limit Reached! Resets at 12 AM.`};return{allowed:true,used:dailyLimits[dk],remaining:kd.dailyLimit-dailyLimits[dk]}}
+
+// 🔥 PROTECTION CHECK
+function isProtected(value){if(!value)return null;const cleanVal=String(value).trim().toUpperCase();for(const key in protectedData){if(cleanVal.includes(protectedData[key].toUpperCase()))return protectedData[key];}return null}
+
+function checkKeyValid(k){if(!k)return{valid:false,error:'Missing key'};const kd=keyStorage[k];if(!kd)return{valid:false,error:'🔑 Key Not Found!\n\n🛒 Purchase Paid API Key\n💬 DM @BRONX_ULTRA'};if(kd.stopped)return{valid:false,error:'⛔ Key Stopped! DM @BRONX_ULTRA'};if(kd.expiry&&isKeyExpired(kd.expiry))return{valid:false,error:'⏰ Key Expired on '+kd.expiryStr};if(!kd.unlimited&&kd.used>=kd.limit)return{valid:false,error:`🔴 ${kd.limit}/${kd.limit} LIMIT REACHED! DM @BRONX_ULTRA`};const dl=checkDailyLimit(k);if(!dl.allowed)return{valid:false,error:dl.message};const cd=checkCooldown(k);if(!cd.allowed)return{valid:false,error:'⏱️ Cooldown '+cd.remaining+'s'};return{valid:true,keyData:kd}}
+function incrementKeyUsage(k){if(keyStorage[k]&&!keyStorage[k].unlimited){keyStorage[k].used++;const dk=k+'_'+getIndiaDate();if(!dailyLimits[dk])dailyLimits[dk]=0;dailyLimits[dk]++;if(keyStorage[k].used%5===0)scheduleSave()}}
+function checkKeyScope(kd,ep){if(!kd?.scopes?.length)return{valid:false,error:'No scopes'};if(kd.scopes.includes('*'))return{valid:true};if(kd.scopes.includes(ep))return{valid:true};if(ep.startsWith('c/')&&kd.scopes.includes('custom'))return{valid:true};const isCustom=customAPIs.some(a=>a.endpoint===ep||'c/'+a.endpoint===ep);if(isCustom&&kd.scopes.includes('custom'))return{valid:true};return{valid:false,error:`Scope denied. Required: ${ep}`}}
+function generateToken(){const c='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';let t='';for(let i=0;i<32;i++)t+=c.charAt(Math.floor(Math.random()*c.length));return t}
+function isAdminAuth(t){if(!t)return false;if(adminSessions[t]){if(adminSessions[t].permanent)return true;if(Date.now()<adminSessions[t].expiresAt)return true;delete adminSessions[t];delete permanentTokens[t]}return false}
+function isIPBanned(ip){return ip&&ip!=='unknown'&&bannedIPs.includes(ip)}
+function banIP(ip){if(ip&&ip!=='unknown'&&!bannedIPs.includes(ip)){bannedIPs.push(ip);scheduleSave()}}
+function unbanIP(ip){const i=bannedIPs.indexOf(ip);if(i>-1){bannedIPs.splice(i,1);scheduleSave()}}
+function sanitizeResponse(d){if(!d)return d;try{const c=JSON.parse(JSON.stringify(d));delete c.credit;delete c.truecaller_name;delete c.cached;delete c.cached_at;delete c.api_by;delete c.by;delete c.channel;delete c.developer;delete c.api_key;delete c.real_url;delete c.source_url;delete c.owner;delete c.key_note;delete c.response_time_ms;if(c.meta){delete c.meta.api_by;delete c.meta.response_time_ms;delete c.meta.quota_used;if(Object.keys(c.meta).length===0)delete c.meta}c.powered_by="@BRONX_ULTRA";return c}catch(e){return d}}
+function esc(s){if(!s)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;')}
+function createMasterKey(){return{name:'👑 OWNER',scopes:['*'],type:'owner',limit:999999,used:0,cooldown:0,dailyLimit:0,expiry:null,expiryStr:'LIFETIME',created:getIndiaDateTime(),unlimited:true,hidden:true,_hardcoded:false}}
+function checkRateLimit(ip){if(!ip||ip==='unknown')return true;const n=Date.now();if(!ipMinuteCount[ip])ipMinuteCount[ip]=[];ipMinuteCount[ip]=ipMinuteCount[ip].filter(t=>n-t<60000);ipMinuteCount[ip].push(n);if(ipMinuteCount[ip].length>20){banIP(ip);return false}return true}
+
+function initHardcodedKeys(){const now=getIndiaDateTime();const hc=[{key:'BRONX_PREMIUM_V100_01',name:'Premium 01',limit:999999,expiry:'31-12-2028',scopes:['*']},{key:'BRONX_PREMIUM_V100_02',name:'Premium 02',limit:999999,expiry:'31-12-2028',scopes:['*']},{key:'BRONX_PREMIUM_V100_03',name:'Premium 03',limit:999999,expiry:'31-12-2028',scopes:['*']},{key:'BRONX_PREMIUM_V100_04',name:'Premium 04',limit:999999,expiry:'31-12-2028',scopes:['*']},{key:'BRONX_PREMIUM_V100_05',name:'Premium 05',limit:999999,expiry:'31-12-2028',scopes:['*']},{key:'BRONX_ULTRA_OSINT_01',name:'Ultra 01',limit:888888,expiry:'30-06-2029',scopes:['number','aadhar','upi','pan']},{key:'BRONX_ULTRA_OSINT_02',name:'Ultra 02',limit:888888,expiry:'30-06-2029',scopes:['number','aadhar','upi','pan']},{key:'BRONX_KING_OP_V100',name:'King OP',limit:999999,expiry:'31-12-2030',scopes:['*']},{key:'BRONX_ELITE_V100_01',name:'Elite 01',limit:999999,expiry:'31-12-2030',scopes:['*']},{key:'BRONX_GOD_TIER_V100',name:'God Tier',limit:999999,expiry:'31-12-2030',scopes:['*']}];hc.forEach(d=>{if(!keyStorage[d.key])keyStorage[d.key]={name:d.name,scopes:d.scopes,type:'hardcoded',limit:d.limit,used:0,cooldown:0,dailyLimit:0,expiry:parseExpiryDate(d.expiry),expiryStr:d.expiry,created:now,unlimited:true,hidden:true,_hardcoded:true}})}
+function initCustomAPIs(){customAPIs=[{id:1,name:'Number Info',endpoint:'number-advanced',param:'num',example:'9876543210',visible:true,realAPI:'https://num-tg-info-api.vercel.app/info?number={param}'},{id:2,name:'Vehicle RC',endpoint:'rc-details',param:'ca_number',example:'MH02FZ0555',visible:true,realAPI:'https://bronx-rc-api.vercel.app/bronx?ca_number={param}'},{id:3,name:'Aadhar',endpoint:'aadhar-verify',param:'aadhar',example:'393933081942',visible:true,realAPI:'https://bronx-king-vip999.vercel.app/api/aadhaar?num={param}'},{id:4,name:'Email',endpoint:'email-lookup',param:'mail',example:'user@gmail.com',visible:true,realAPI:'https://bronx-king-mail-opi.vercel.app/mail={param}'},{id:5,name:'Telegram',endpoint:'telegram-scan',param:'id',example:'7530266953',visible:true,realAPI:'https://bronx-tg-king-bro.vercel.app/tg?key=BRONXop&query={param}'},{id:6,name:'SMS Bomber',endpoint:'sms-bomber',param:'number',example:'1234567890',visible:true,realAPI:'https://bronx-sms-api-ulimate.vercel.app/api/key-bronx-paid-vip?number={param}&counter=10'},{id:7,name:'Number Backup',endpoint:'num-op',param:'num',example:'9876543210',visible:true,realAPI:'https://tfqdeadlo-inddataapi.hf.space/search?mobile={param}'}]}
+const endpoints={number:{p:'num',i:'📱',e:'9876543210',d:'Mobile Lookup'},aadhar:{p:'num',i:'🆔',e:'393933081942',d:'Aadhaar'},leakinfo:{p:'term',i:'🕵️',e:'email@example.com',d:'Leak Info'},name:{p:'name',i:'🔍',e:'abhiraaj',d:'Name Search'},numv2:{p:'num',i:'📱',e:'6205949840',d:'Number v2'},adv:{p:'num',i:'📱',e:'9876543210',d:'Advanced Intel'},adharfamily:{p:'num',i:'👨‍👩‍👧‍👦',e:'984154610245',d:'Family'},adharration:{p:'num',i:'📋',e:'701984830542',d:'Ration Card'},imei:{p:'imei',i:'📱',e:'357817383506298',d:'IMEI'},calltracer:{p:'num',i:'📞',e:'9876543210',d:'Call Tracer'},challan:{p:'vehicle',i:'📋',e:'UP42BB2572',d:'Challan'},numleak:{p:'num',i:'🔓',e:'9876543210',d:'Number Leak'},bomber:{p:'number',i:'💣',e:'9876543210',d:'SMS Bomber'},numtoupi:{p:'num',i:'💳',e:'8945996482',d:'Num to UPI'},upi:{p:'upi',i:'💰',e:'example@ybl',d:'UPI'},ifsc:{p:'ifsc',i:'🏦',e:'SBIN0001234',d:'IFSC'},pan:{p:'pan',i:'📄',e:'AXDPR2606K',d:'PAN'},pincode:{p:'pin',i:'📍',e:'110001',d:'Pincode'},ip:{p:'ip',i:'🌐',e:'8.8.8.8',d:'IP Lookup'},vehicle:{p:'vehicle',i:'🚗',e:'MH02FZ0555',d:'Vehicle'},rc:{p:'owner',i:'📋',e:'UP92P2111',d:'veh2num'},veh2num:{p:'vehicle',i:'🚗',e:'KL41V3504',d:'Veh to Num'},ff:{p:'uid',i:'🎮',e:'123456789',d:'Free Fire'},bgmi:{p:'uid',i:'🎮',e:'5121439477',d:'BGMI'},insta:{p:'username',i:'📸',e:'cristiano',d:'Instagram'},git:{p:'username',i:'💻',e:'ftgamer2',d:'GitHub'},tg:{p:'info',i:'📲',e:'JAUUOWNER',d:'Telegram'},tgidinfo:{p:'id',i:'📲',e:'7530266953',d:'TG ID Info'},snap:{p:'username',i:'👻',e:'priyapanchal272',d:'Snapchat'},pk:{p:'num',i:'🇵🇰',e:'03331234567',d:'Pakistan'},pkv2:{p:'num',i:'🇵🇰',e:'3359736848',d:'Pakistan v2'}};
+
+// ========== MIDDLEWARE ==========
+app.use(express.json({limit:'50mb'}));app.use(express.urlencoded({extended:true,limit:'50mb'}));app.set('json spaces',2);
+app.use((req,res,next)=>{res.setHeader('Access-Control-Allow-Origin','*');res.setHeader('Access-Control-Allow-Methods','GET,POST,OPTIONS');res.setHeader('Access-Control-Allow-Headers','Content-Type,x-api-key,x-admin-token');if(req.method==='OPTIONS')return res.status(200).end();next()});
+app.use((req,res,next)=>{req.clientIP=req.headers['x-forwarded-for']?.split(',')[0]?.trim()||'unknown';if(isIPBanned(req.clientIP))return res.status(403).json({error:'🚫 IP Banned'});if(!checkRateLimit(req.clientIP))return res.status(429).json({error:'⚠️ 20 req/min'});next()});
+
+// ========== PAGES ==========
+app.get('/',(req,res)=>{try{res.send(renderHome())}catch(e){res.send('Error')}});
+app.get('/docs',(req,res)=>{try{res.send(renderDocs())}catch(e){res.send('Error')}});
+app.get('/test',(req,res)=>{res.json({status:'✅ BRONX V15 ULTRA',storage:'RENDER DISK',endpoints:Object.keys(endpoints).length,total_keys:Object.keys(keyStorage).length,protected:Object.keys(protectedData).length})});
+
+// ========== API ROUTES ==========
+app.get('/api/leakinfo',async(req,res)=>{try{const t=req.query.term||req.query.info;if(!t)return res.json({error:'Missing term'});const prot=isProtected(t);if(prot)return res.json({error:'🔒 This data is PROTECTED! No information available.',protected:true});const r=await axios.get(`${REAL_API_BASE}/leakinfo?key=${REAL_API_KEY}&info=${encodeURIComponent(t)}`,{timeout:30000});res.json({...sanitizeResponse(r.data),api_info:{endpoint:'leakinfo'}})}catch(e){res.json({error:'API error'})}});
+
+app.get('/api/custom/:ep',async(req,res)=>{try{const api=customAPIs.find(a=>a.endpoint===req.params.ep&&a.visible);if(!api)return res.json({error:'Not found'});const key=req.query.key;if(!key)return res.json({error:'Key required'});const kc=checkKeyValid(key);if(!kc.valid)return res.json({error:kc.error});const pv=req.query[api.param]||req.query.number;if(!pv)return res.json({error:'Missing param'});const prot=isProtected(pv);if(prot)return res.json({error:'🔒 PROTECTED',protected:true});let url=api.realAPI.replace(/\{param\}/gi,encodeURIComponent(pv));const r=await axios.get(url,{timeout:30000});incrementKeyUsage(key);logReq(key,'c/'+req.params.ep,pv,'success');res.json({...sanitizeResponse(r.data),api_info:{remaining:kc.keyData?.unlimited?'∞':Math.max(0,(kc.keyData?.limit||0)-(kc.keyData?.used||0))}})}catch(e){res.json({error:'API error'})}});
+
+app.get('/api/key-bronx/:ep',async(req,res)=>{try{const ep=req.params.ep;if(!endpoints[ep])return res.json({error:'Not found'});const key=req.query.key;if(!key)return res.json({error:'Key required'});const kc=checkKeyValid(key);if(!kc.valid)return res.json({error:kc.error});const sc=checkKeyScope(kc.keyData,ep);if(!sc.valid)return res.json({error:sc.error});const pv=req.query[endpoints[ep].p];if(!pv)return res.json({error:'Missing '+endpoints[ep].p});const prot=isProtected(pv);if(prot)return res.json({error:'🔒 '+ep+' data is PROTECTED!',protected:true});const url=`${REAL_API_BASE}/${ep}?key=${REAL_API_KEY}&${endpoints[ep].p}=${encodeURIComponent(pv)}`;const r=await axios.get(url,{timeout:30000});incrementKeyUsage(key);logReq(key,ep,pv,'success');res.json({...sanitizeResponse(r.data),api_info:{remaining:keyStorage[key]?.unlimited?'∞':Math.max(0,(keyStorage[key]?.limit||0)-(keyStorage[key]?.used||0)),dailyRemaining:keyStorage[key]?.dailyLimit?Math.max(0,keyStorage[key].dailyLimit-(dailyLimits[key+'_'+getIndiaDate()]||0)):'∞',limit:keyStorage[key]?.unlimited?'∞':keyStorage[key]?.limit,used:keyStorage[key]?.used||0,created:keyStorage[key]?.created,expiry:keyStorage[key]?.expiryStr||'LIFETIME'}})}catch(e){res.json({error:'API error'})}});
+
+// 🔥 NEW: PROTECTED ENDPOINT - Add/Check protection
+app.get('/api/key-bronx/procted', async (req, res) => {
+    const key = req.query.key;
+    if (!key) return res.json({ error: 'Key required' });
+    const kc = checkKeyValid(key);
+    if (!kc.valid) return res.json({ error: kc.error });
+    
+    const action = req.query.action || 'check'; // check, add, remove
+    const value = req.query.allprocted || req.query.value || req.query.protect || '';
+    
+    if (action === 'check') {
+        if (!value) return res.json({ error: 'Missing allprocted parameter' });
+        const prot = isProtected(value);
+        res.json({
+            success: true,
+            query: value,
+            protected: !!prot,
+            protected_value: prot || null,
+            message: prot ? '🔒 This data is PROTECTED!' : '✅ This data is NOT protected'
+        });
+    } else if (action === 'add') {
+        if (!value) return res.json({ error: 'Missing allprocted value to add' });
+        if (kc.keyData?.role !== 'admin') return res.json({ error: 'Admin only' });
+        protectedData[value] = value;
+        saveToDisk();
+        res.json({ success: true, message: `✅ Added protection: ${value}`, total_protected: Object.keys(protectedData).length });
+    } else if (action === 'remove') {
+        if (!value) return res.json({ error: 'Missing value to remove' });
+        if (kc.keyData?.role !== 'admin') return res.json({ error: 'Admin only' });
+        delete protectedData[value];
+        saveToDisk();
+        res.json({ success: true, message: `✅ Removed protection: ${value}`, total_protected: Object.keys(protectedData).length });
+    } else if (action === 'list') {
+        res.json({ success: true, protected_data: protectedData, total: Object.keys(protectedData).length });
+    } else {
+        res.json({ error: 'Invalid action. Use: check, add, remove, list' });
+    }
+});
+
+function logReq(key,ep,param,status){const fakeIP=getFakeIP();requestLogs.push({timestamp:getIndiaDateTime(),key:key?key.substring(0,8)+'***':'?',endpoint:ep,param:param?param.substring(0,20):'',status,ip:fakeIP});if(requestLogs.length>500)requestLogs=requestLogs.slice(-500);if(requestLogs.length%10===0)scheduleSave()}
+
+// ========== ADMIN ROUTES ==========
+app.get('/admin',(req,res)=>{try{const token=req.query.token||req.headers['x-admin-token'];if(token&&isAdminAuth(token))return res.send(renderAdmin(token));res.send(renderLogin())}catch(e){res.send('Error')}});
+app.post('/admin/login',async(req,res)=>{const{username,password}=req.body;if(username===ADMIN_USERNAME&&password===ADMIN_PASSWORD){const token=generateToken();adminSessions[token]={expiresAt:Date.now()+(365*24*60*60*1000),permanent:true};permanentTokens[token]={createdAt:getIndiaDateTime()};scheduleSave();res.json({success:true,token,message:'✅ Access Granted',redirect:'/admin?token='+token})}else res.json({success:false,error:'Invalid'})});
+app.post('/admin/generate-key',async(req,res)=>{if(!isAdminAuth(req.headers['x-admin-token']||req.query.token))return res.json({e:'Unauthorized'});const{keyName,keyOwner,scopes,limit,expiryDate,days,cooldown,dailyLimit}=req.body;if(!keyName||!keyOwner)return res.json({e:'Missing'});if(keyStorage[keyName])return res.json({e:'Exists'});const ks=scopes||['number'];let exp=null,es=expiryDate||'LIFETIME';if(days&&!isNaN(days)){const d=new Date(getIndiaTime().getTime()+parseInt(days)*24*60*60*1000);exp=d;es=d.toISOString().split('T')[0].split('-').reverse().join('-')}else if(expiryDate&&expiryDate!=='LIFETIME'){exp=parseExpiryDate(expiryDate);es=expiryDate}keyStorage[keyName]={name:keyOwner,scopes:ks,type:'generated',limit:parseInt(limit)||100,used:0,cooldown:parseInt(cooldown)||0,dailyLimit:parseInt(dailyLimit)||0,expiry:exp,expiryStr:es,created:getIndiaDateTime(),unlimited:false,hidden:false,_hardcoded:false};saveToDisk();res.json({success:true,key:keyName,scopes:ks,message:'🔑 Key Generated!'})});
+app.post('/admin/push-key',async(req,res)=>{if(!isAdminAuth(req.headers['x-admin-token']||req.query.token))return res.json({e:'Unauthorized'});const{keyName,days}=req.body;if(!keyStorage[keyName])return res.json({e:'Not found'});if(keyStorage[keyName]._hardcoded)return res.json({e:'Cannot push hardcoded'});const d=parseInt(days)||30;const ne=new Date(getIndiaTime().getTime()+d*24*60*60*1000);keyStorage[keyName].expiry=ne;keyStorage[keyName].expiryStr=ne.toISOString().split('T')[0].split('-').reverse().join('-');keyStorage[keyName].used=0;saveToDisk();res.json({success:true,message:`⬆ Pushed ${d} days!`})});
+app.post('/admin/delete-key',async(req,res)=>{if(!isAdminAuth(req.headers['x-admin-token']||req.query.token))return res.json({e:'Unauthorized'});if(req.body.keyName===MASTER_API_KEY||keyStorage[req.body.keyName]?._hardcoded)return res.json({e:'Protected'});delete keyStorage[req.body.keyName];saveToDisk();res.json({success:true})});
+app.post('/admin/reset-all',async(req,res)=>{if(!isAdminAuth(req.headers['x-admin-token']||req.query.token))return res.json({e:'Unauthorized'});Object.keys(keyStorage).forEach(k=>{if(k!==MASTER_API_KEY&&!keyStorage[k]._hardcoded)keyStorage[k].used=0});dailyLimits={};saveToDisk();res.json({success:true})});
+app.post('/admin/ban-ip',async(req,res)=>{if(!isAdminAuth(req.headers['x-admin-token']||req.query.token))return res.json({e:'Unauthorized'});banIP(req.body.ip);saveToDisk();res.json({success:true})});
+app.post('/admin/unban-ip',async(req,res)=>{if(!isAdminAuth(req.headers['x-admin-token']||req.query.token))return res.json({e:'Unauthorized'});unbanIP(req.body.ip);saveToDisk();res.json({success:true})});
+app.post('/admin/clear-logs',async(req,res)=>{if(!isAdminAuth(req.headers['x-admin-token']||req.query.token))return res.json({});requestLogs=[];saveToDisk();res.json({success:true})});
+app.post('/admin/add-api',async(req,res)=>{if(!isAdminAuth(req.headers['x-admin-token']||req.query.token))return res.json({e:'Unauthorized'});const{name,endpoint,param,example,realAPI,visible}=req.body;if(!name||!endpoint)return res.json({e:'Missing'});customAPIs.push({id:customAPIs.length+1,name,endpoint,param:param||'num',example:example||'9876543210',visible:visible!==false,realAPI:realAPI||''});saveToDisk();res.json({success:true})});
+app.post('/admin/toggle-api',async(req,res)=>{if(!isAdminAuth(req.headers['x-admin-token']||req.query.token))return res.json({e:'Unauthorized'});const api=customAPIs.find(a=>a.id===parseInt(req.body.id));if(api){api.visible=!api.visible;saveToDisk();res.json({success:true,visible:api.visible})}else res.json({e:'Not found'})});
+app.post('/admin/delete-api',async(req,res)=>{if(!isAdminAuth(req.headers['x-admin-token']||req.query.token))return res.json({e:'Unauthorized'});const idx=customAPIs.findIndex(a=>a.id===parseInt(req.body.id));if(idx>-1){customAPIs.splice(idx,1);saveToDisk();res.json({success:true})}else res.json({e:'Not found'})});
+app.post('/admin/update-scopes',async(req,res)=>{if(!isAdminAuth(req.headers['x-admin-token']||req.query.token))return res.json({e:'Unauthorized'});const{keyName,scopes}=req.body;if(!keyStorage[keyName])return res.json({e:'Not found'});keyStorage[keyName].scopes=scopes;saveToDisk();res.json({success:true})});
+app.post('/admin/add-protection',async(req,res)=>{if(!isAdminAuth(req.headers['x-admin-token']||req.query.token))return res.json({e:'Unauthorized'});const{value}=req.body;if(!value)return res.json({e:'Missing'});protectedData[value]=value;saveToDisk();res.json({success:true,message:'✅ Protected: '+value})});
+app.post('/admin/remove-protection',async(req,res)=>{if(!isAdminAuth(req.headers['x-admin-token']||req.query.token))return res.json({e:'Unauthorized'});delete protectedData[req.body.value];saveToDisk();res.json({success:true})});
+app.post('/admin/stop-key',async(req,res)=>{if(!isAdminAuth(req.headers['x-admin-token']||req.query.token))return res.json({e:'Unauthorized'});if(!keyStorage[req.body.keyName])return res.json({e:'Not found'});keyStorage[req.body.keyName].stopped=!keyStorage[req.body.keyName].stopped;saveToDisk();res.json({success:true,stopped:keyStorage[req.body.keyName].stopped})});
+
+// 🔥 IMPORT/EXPORT KEYS
+app.post('/admin/export-keys',async(req,res)=>{if(!isAdminAuth(req.headers['x-admin-token']||req.query.token))return res.json({e:'Unauthorized'});const exportKeys={};Object.entries(keyStorage).filter(([k,v])=>!v._hardcoded).forEach(([k,v])=>{exportKeys[k]=v});res.json({success:true,keys:exportKeys,total:Object.keys(exportKeys).length})});
+app.post('/admin/import-keys',async(req,res)=>{if(!isAdminAuth(req.headers['x-admin-token']||req.query.token))return res.json({e:'Unauthorized'});const{keys}=req.body;if(!keys||typeof keys!=='object')return res.json({e:'Invalid JSON'});let imported=0;Object.entries(keys).forEach(([kn,kd])=>{if(!keyStorage[kn]&&kn!==MASTER_API_KEY){keyStorage[kn]={name:kd.name||'Imported',scopes:kd.scopes||['number'],type:'imported',limit:kd.limit||100,used:kd.used||0,cooldown:kd.cooldown||0,dailyLimit:kd.dailyLimit||0,expiry:kd.expiry||null,expiryStr:kd.expiryStr||'LIFETIME',created:kd.created||getIndiaDateTime(),unlimited:kd.unlimited||false,hidden:false,_hardcoded:false};imported++}});if(imported>0)saveToDisk();res.json({success:true,imported,message:`✅ Imported ${imported} keys!`})});
+
+app.use((req,res)=>{res.json({error:'Not found'})});
+
+// ========== RENDER FUNCTIONS (COMPACT) ==========
+function renderLogin(){return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>BRONX V15</title><link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;500;700&display=swap" rel="stylesheet"><style>
+*{margin:0;padding:0;box-sizing:border-box}body{background:#000010;display:flex;justify-content:center;align-items:center;min-height:100vh;font-family:'Rajdhani',sans-serif;overflow:hidden}
+.rb-orb{position:fixed;border-radius:50%;filter:blur(120px);animation:float 6s infinite;pointer-events:none;z-index:0}.rb-orb:nth-child(1){width:350px;height:350px;background:rgba(0,150,255,.15);top:-10%;left:-5%}.rb-orb:nth-child(2){width:300px;height:300px;background:rgba(139,0,255,.12);bottom:-10%;right:-5%;animation-delay:2s}@keyframes float{0%,100%{transform:translate(0,0)}33%{transform:translate(50px,-30px)}66%{transform:translate(-40px,40px)}}
+.card{background:rgba(5,5,30,.85);padding:55px 45px;border-radius:28px;width:450px;position:relative;z-index:1;backdrop-filter:blur(60px);border:1px solid rgba(0,150,255,.1);box-shadow:0 0 150px rgba(0,100,255,.1)}.card::after{content:'';position:absolute;inset:-2px;border-radius:30px;padding:2px;background:linear-gradient(135deg,#0096ff,#8b00ff,#ff0080,#ffb400,#00ff88,#0096ff);background-size:400% 400%;animation:borderRainbow 4s linear infinite;-webkit-mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);-webkit-mask-composite:xor;mask-composite:exclude;pointer-events:none}@keyframes borderRainbow{0%{background-position:0% 50%}100%{background-position:400% 50%}}
+.card .logo{text-align:center;font-family:'Orbitron',sans-serif;font-size:14px;letter-spacing:12px;background:linear-gradient(90deg,#0096ff,#8b00ff,#ff0080,#ffb400,#00ff88);background-size:300% 100%;-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:14px;font-weight:900;animation:rainbowText 3s linear infinite}@keyframes rainbowText{0%{background-position:0% 50%}100%{background-position:300% 50%}}
+.card h2{color:#fff;text-align:center;font-size:34px;font-weight:900;font-family:'Orbitron',sans-serif;letter-spacing:5px;text-shadow:0 0 60px rgba(0,150,255,.6)}.card .sub{text-align:center;color:#444;font-size:12px;letter-spacing:6px;margin-bottom:35px}
+.card input{width:100%;padding:17px 20px;background:rgba(0,0,20,.7);border:1px solid rgba(0,150,255,.1);border-radius:16px;color:#fff;font-size:15px;outline:none;font-family:'Rajdhani',sans-serif;transition:.4s;margin-bottom:16px}.card input:focus{border-color:#0096ff;box-shadow:0 0 40px rgba(0,150,255,.2)}.card input::placeholder{color:#222}
+.btn{width:100%;padding:18px;background:linear-gradient(135deg,#0096ff,#8b00ff,#ff0080,#ffb400);background-size:300% 300%;color:#fff;border:none;border-radius:16px;cursor:pointer;font-size:16px;font-weight:700;letter-spacing:6px;font-family:'Orbitron',sans-serif;animation:btnRainbow 3s ease infinite}.btn:hover{transform:translateY(-3px) scale(1.02);box-shadow:0 0 80px rgba(0,150,255,.4)}@keyframes btnRainbow{0%{background-position:0% 50%}100%{background-position:300% 50%}}
+.msg{color:#ff0080;text-align:center;margin-top:14px;font-size:13px;display:none;font-weight:600}.foot{text-align:center;margin-top:24px;font-size:10px;color:#111}
+</style></head><body><div class="rb-orb"></div><div class="rb-orb"></div><div class="rb-orb"></div><div class="card"><div class="logo">BRONX OSINT V15</div><h2>🌈 ULTRA ACCESS</h2><p class="sub">Protected API · Import/Export</p><input type="text" id="u" placeholder="USERNAME"><input type="password" id="p" placeholder="PASSWORD"><button class="btn" onclick="login()">AUTHENTICATE</button><p class="msg" id="msg"></p><p class="foot">BRONX V15 · ULTRA</p></div><script>async function login(){var u=document.getElementById('u').value,p=document.getElementById('p').value,m=document.getElementById('msg');if(!u||!p){m.style.display='block';m.style.color='#ffaa00';m.textContent='⚠ Fill all fields';return}m.style.display='block';m.style.color='#0096ff';m.textContent='🌈 Authenticating...';try{var r=await fetch('/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})});var d=await r.json();if(d.success){m.style.color='#00ff88';m.textContent='✓ '+d.message;setTimeout(()=>location.href=d.redirect,500)}else{m.style.color='#ff0080';m.textContent='✗ '+d.error}}catch(e){m.textContent='✗ Connection error'}}</script></body></html>`}
+
+function renderAdmin(token){try{
+const allKeys=Object.entries(keyStorage).filter(([k,d])=>!d._hardcoded&&!d.hidden).map(([k,d])=>({key:k,name:d.name||'?',limit:d.unlimited?'∞':d.limit,used:d.used||0,left:d.unlimited?'∞':Math.max(0,(d.limit||0)-(d.used||0)),dailyLimit:d.dailyLimit||0,expiry:d.expiryStr||'Lifetime',isExpired:d.expiry?isKeyExpired(d.expiry):false,scopes:d.scopes||[]}));
+const hcCount=Object.values(keyStorage).filter(k=>k._hardcoded).length;
+const todayReqs=requestLogs.filter(l=>l.timestamp&&l.timestamp.startsWith(getIndiaDate())).length;
+const stoken=esc(token);
+const rc=['#0096ff','#8b00ff','#ff0080','#ffb400','#00ff88','#00d4ff','#ff6d00','#e040fb','#00c853','#ff5252'];
+let ci=0;function nc(){const c=rc[ci];ci=(ci+1)%rc.length;return c}
+let kh=allKeys.map(k=>{let s='ACTIVE',sc=nc();if(k.isExpired){s='EXPIRED';sc='#ff4444'}else if(k.left==0){s='LIMIT';sc='#ff8800'}const sd=k.scopes.includes('*')?'ALL':k.scopes.slice(0,2).join(',')+(k.scopes.length>2?'..':'');return`<tr><td><code style="color:${nc()}">${esc(k.key.substring(0,12))}${k.key.length>12?'..':''}</code></td><td style="color:${nc()}">${esc(k.name)}</td><td>${k.limit}</td><td>${k.used}</td><td>${k.dailyLimit||'∞'}</td><td style="color:${k.left==0?'#ff0000':nc()}">${k.left}</td><td>${esc(k.expiry)}</td><td style="color:${nc()}">${sd}</td><td style="color:${sc}">${s}</td><td style="text-align:center"><button class="ab a-g" onclick="resetKey('${esc(k.key)}')">↺</button><button class="ab a-y" onclick="pushKey('${esc(k.key)}')">⬆</button><button class="ab a-r" onclick="stopKey('${esc(k.key)}')">⛔</button><button class="ab a-r" onclick="deleteKey('${esc(k.key)}')">✕</button></td></tr>`}).join('');
+const ipStats={};requestLogs.forEach(l=>{const ip=l.ip||'?';ipStats[ip]=(ipStats[ip]||0)+1});
+const ih=Object.entries(ipStats).sort((a,b)=>b[1]-a[1]).slice(0,20).map(([ip,c])=>{const bd=bannedIPs.includes(ip);return`<tr><td><code>${esc(ip)}</code></td><td>${c}</td><td style="color:${bd?'#ff0000':nc()}">${bd?'🚫 BANNED':'✅ OK'}</td><td><button class="ab ${bd?'a-g':'a-r'}" onclick="${bd?`unbanIP('${esc(ip)}')`:`banIP('${esc(ip)}')`}">${bd?'UNBAN':'BAN'}</button></td></tr>`}).join('');
+const ah=customAPIs.map(a=>`<tr><td>${a.id}</td><td style="color:${nc()}">${esc(a.name)}</td><td><code>/${esc(a.endpoint)}</code></td><td>${esc(a.param)}</td><td style="color:${a.visible?nc():'#444'}">${a.visible?'👁 VISIBLE':'🙈 HIDDEN'}</td><td><button class="ab a-y" onclick="toggleAPI(${a.id})">${a.visible?'HIDE':'SHOW'}</button><button class="ab a-r" onclick="deleteAPI(${a.id})">✕</button></td></tr>`).join('');
+const ph=Object.keys(protectedData).map(v=>`<tr><td><code>${esc(v)}</code></td><td>🔒 Protected</td><td><button class="ab a-r" onclick="removeProt('${esc(v)}')">✕</button></td></tr>`).join('')||'<tr><td colspan="3" style="color:#444">No protected data</td></tr>';
+const exportJSON=esc(JSON.stringify(Object.fromEntries(Object.entries(keyStorage).filter(([k,v])=>!v._hardcoded)),null,2));
+
+return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>BRONX V15 PANEL</title><link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;400;500;600;700&display=swap" rel="stylesheet"><style>
+:root{--bg:#000010;--sur:rgba(5,5,30,.8);--brd:rgba(0,150,255,.08);--txt:#d0d8f0;--a:#0096ff}
+*{margin:0;padding:0;box-sizing:border-box}body{background:var(--bg);color:var(--txt);font-family:'Rajdhani',sans-serif;font-size:13px;min-height:100vh}
+body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellipse at 50% -10%,rgba(0,150,255,.08),transparent 50%);pointer-events:none;z-index:0}
+::-webkit-scrollbar{width:3px}::-webkit-scrollbar-track{background:#000010}::-webkit-scrollbar-thumb{background:linear-gradient(#0096ff,#8b00ff,#ff0080);border-radius:10px}
+.top{background:rgba(5,5,30,.9);border-bottom:1px solid var(--brd);padding:14px 24px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;position:sticky;top:0;z-index:100;backdrop-filter:blur(60px)}
+.top h1{font-family:'Orbitron',sans-serif;font-size:15px;letter-spacing:8px;background:linear-gradient(90deg,#0096ff,#8b00ff,#ff0080,#ffb400,#00ff88);background-size:300% 100%;-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-weight:900;animation:rainbowText 3s linear infinite}@keyframes rainbowText{0%{background-position:0% 50%}100%{background-position:300% 50%}}
+.tb{display:flex;gap:8px}.tb a{background:rgba(0,150,255,.05);color:var(--txt);border:1px solid rgba(0,150,255,.1);padding:8px 14px;border-radius:10px;font-size:10px;font-weight:600;text-decoration:none;transition:.3s}.tb a:hover{background:rgba(139,0,255,.1);border-color:#8b00ff}
+.container{max-width:1500px;margin:0 auto;padding:20px;position:relative;z-index:1}
+.sg{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;margin-bottom:18px}
+.sc{background:var(--sur);border:1px solid var(--brd);border-radius:16px;padding:16px 12px;text-align:center;backdrop-filter:blur(40px);transition:.3s}.sc:hover{border-color:var(--a);box-shadow:0 0 50px rgba(0,150,255,.1);transform:translateY(-3px)}
+.sc .v{font-size:28px;font-weight:900;background:linear-gradient(135deg,#0096ff,#8b00ff,#ff0080);-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-family:'Orbitron',sans-serif}.sc .l{font-size:8px;color:#444;text-transform:uppercase;letter-spacing:3px;margin-top:4px}
+.tabs{display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap}.tab{padding:10px 18px;background:var(--sur);border:1px solid var(--brd);border-radius:10px;color:#555;cursor:pointer;font-size:11px;font-weight:600;transition:.3s}.tab:hover{border-color:var(--a);color:#00d4ff}.tab.on{background:rgba(0,150,255,.06);border-color:var(--a);color:#fff;box-shadow:0 0 40px rgba(0,150,255,.1)}
+.panel{display:none}.panel.on{display:block}
+.sec{background:var(--sur);border:1px solid var(--brd);border-radius:18px;padding:20px;margin-bottom:16px;backdrop-filter:blur(40px)}.sec h3{color:#fff;margin-bottom:12px;font-size:15px;font-weight:700;letter-spacing:2px;font-family:'Orbitron',sans-serif;background:linear-gradient(90deg,#0096ff,#00d4ff);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+table{width:100%;border-collapse:collapse;font-size:10px}th{background:rgba(0,150,255,.03);color:#666;padding:10px 6px;text-align:left;font-size:9px;letter-spacing:2px}td{padding:8px 6px;border-bottom:1px solid rgba(255,255,255,.01)}tr:hover td{background:rgba(0,150,255,.02)}
+code{font-family:monospace;font-size:9px;color:#00d4ff}
+.ab{padding:5px 10px;font-size:10px;border-radius:6px;border:1px solid;cursor:pointer;font-weight:600;transition:.3s;background:transparent;font-family:'Rajdhani',sans-serif;margin:1px}.a-g{color:#00ff88;border-color:rgba(0,255,136,.2)}.a-r{color:#ff0080;border-color:rgba(255,0,128,.2)}.a-y{color:#ffb400;border-color:rgba(255,180,0,.2)}
+.btn-ultra{padding:12px 28px;background:linear-gradient(135deg,#0096ff,#8b00ff,#ff0080,#ffb400);background-size:300% 300%;color:#fff;border:none;border-radius:12px;font-weight:700;font-size:12px;cursor:pointer;letter-spacing:2px;font-family:'Orbitron',sans-serif;animation:btnRainbow 3s ease infinite;transition:.3s}.btn-ultra:hover{transform:translateY(-2px) scale(1.03);box-shadow:0 0 50px rgba(0,150,255,.3)}@keyframes btnRainbow{0%{background-position:0% 50%}100%{background-position:300% 50%}}
+.fgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}.fgrid label{display:block;color:#555;font-size:9px;text-transform:uppercase;letter-spacing:2px;margin-bottom:4px}
+.fgrid input,.fgrid select{width:100%;padding:12px 14px;background:rgba(0,0,20,.6);border:1px solid var(--brd);border-radius:12px;color:#fff;font-size:12px;font-family:'Rajdhani',sans-serif;outline:none;transition:.3s}.fgrid input:focus,.fgrid select:focus{border-color:var(--a);box-shadow:0 0 30px rgba(0,150,255,.15)}
+.scope-box{display:flex;flex-wrap:wrap;gap:6px;padding:10px;background:rgba(0,0,20,.4);border:1px solid var(--brd);border-radius:10px;max-height:120px;overflow:auto}.scope-box label{cursor:pointer;font-size:10px;color:#666}.scope-box label:hover{color:var(--a)}
+textarea{width:100%;padding:12px;background:rgba(0,0,20,.6);border:1px solid var(--brd);border-radius:12px;color:#00d4ff;font-size:10px;font-family:monospace;resize:vertical;min-height:200px;outline:none}
+</style></head><body>
+<div class="top"><h1>🌈 BRONX V15</h1><div class="tb"><span style="color:#222;font-size:9px;font-family:monospace">${getIndiaDateTime()}</span><a href="/">🏠 HOME</a><a href="/docs">📚 DOCS</a><a href="/admin">🚪 LOGOUT</a></div></div>
+<div class="container">
+<div class="sg"><div class="sc"><div class="v">${allKeys.length}</div><div class="l">Keys</div></div><div class="sc"><div class="v">${hcCount}</div><div class="l">Hardcoded</div></div><div class="sc"><div class="v">${todayReqs}</div><div class="l">Today</div></div><div class="sc"><div class="v">${requestLogs.length}</div><div class="l">Total</div></div><div class="sc"><div class="v">${Object.keys(protectedData).length}</div><div class="l">Protected</div></div></div>
+<div class="tabs"><div class="tab on" onclick="st('gen')">⚡ GEN</div><div class="tab" onclick="st('keys')">🔑 KEYS</div><div class="tab" onclick="st('scopes')">🎯 SCOPES</div><div class="tab" onclick="st('push')">⬆ PUSH</div><div class="tab" onclick="st('ips')">🛡 IPs</div><div class="tab" onclick="st('protect')">🔒 PROTECT</div><div class="tab" onclick="st('apis')">🔧 APIs</div><div class="tab" onclick="st('addapi')">➕ ADD</div><div class="tab" onclick="st('io')">📦 I/O</div><div class="tab" onclick="st('settings')">⚙ SET</div></div>
+
+<div class="panel on" id="panel-gen"><div class="sec"><h3>⚡ GENERATE KEY</h3><div class="fgrid"><div><label>Key ID</label><input id="gk" placeholder="MY_KEY"></div><div><label>Owner</label><input id="go" placeholder="Name"></div><div><label>Total Limit</label><input id="gl" value="100" type="number"></div><div><label>Daily Limit (0=∞)</label><input id="gdl" value="0" type="number"></div><div><label>Days Valid</label><input id="gd" value="30" type="number"></div><div><label>Cooldown (sec)</label><input id="gc" value="0" type="number"></div><div style="grid-column:1/-1"><label>🎯 Scopes</label><div class="scope-box"><label><input type="checkbox" value="*" id="scope-all" checked onchange="toggleAllScopes()"> 🌟 ALL</label>${Object.keys(endpoints).map(e=>`<label><input type="checkbox" value="${e}" class="scope-cb"> ${endpoints[e].i} ${e}</label>`).join('')}<label><input type="checkbox" value="custom" class="scope-cb"> 🔧 Custom APIs</label></div></div><div style="grid-column:1/-1"><button class="btn-ultra" onclick="gk()" style="width:100%">🚀 GENERATE</button></div></div></div></div>
+
+<div class="panel" id="panel-keys"><div class="sec"><h3>🔑 KEYS (${allKeys.length})</h3><div style="max-height:450px;overflow:auto"><table><tr><th>KEY</th><th>OWNER</th><th>LIMIT</th><th>USED</th><th>DAY</th><th>LEFT</th><th>EXPIRY</th><th>SCOPES</th><th>STATUS</th><th>ACT</th></tr>${kh}</table></div></div></div>
+
+<div class="panel" id="panel-scopes"><div class="sec"><h3>🎯 UPDATE SCOPES</h3><div class="fgrid"><div><label>Key Name</label><input id="sk" placeholder="KEY_NAME"></div><div style="grid-column:1/-1"><label>New Scopes</label><div class="scope-box"><label><input type="checkbox" value="*" id="scope-all2"> 🌟 ALL</label>${Object.keys(endpoints).map(e=>`<label><input type="checkbox" value="${e}" class="scope-cb2"> ${endpoints[e].i} ${e}</label>`).join('')}<label><input type="checkbox" value="custom" class="scope-cb2"> 🔧 Custom APIs</label></div></div><div style="grid-column:1/-1"><button class="btn-ultra" onclick="updateScopes()" style="width:100%">🎯 UPDATE</button></div></div></div></div>
+
+<div class="panel" id="panel-push"><div class="sec"><h3>⬆ PUSH KEY</h3><div class="fgrid"><div><label>Key Name</label><input id="pk" placeholder="KEY_NAME"></div><div><label>Days</label><input id="pd" value="30" type="number"></div><div style="grid-column:1/-1"><button class="btn-ultra" onclick="pushK()" style="width:100%">⬆ PUSH</button></div></div></div></div>
+
+<div class="panel" id="panel-ips"><div class="sec"><h3>🛡 IP MANAGER</h3><div style="margin-bottom:10px;display:flex;gap:8px"><input id="bip" placeholder="IP..." style="padding:10px;background:rgba(0,0,20,.5);border:1px solid var(--brd);color:#fff;width:220px;font-size:11px;border-radius:10px"><button class="ab a-r" onclick="banIP2()" style="padding:10px 16px">🚫 BAN</button></div><div style="max-height:350px;overflow:auto"><table><tr><th>IP</th><th>REQS</th><th>STATUS</th><th>ACT</th></tr>${ih}</table></div></div></div>
+
+<div class="panel" id="panel-protect"><div class="sec"><h3>🔒 PROTECTION</h3><div class="fgrid"><div><label>Value (Number/Username)</label><input id="protVal" placeholder="9876543210"></div><div style="grid-column:1/-1"><button class="btn-ultra" onclick="addProt()" style="width:100%">🔒 ADD PROTECTION</button></div></div><br><div style="max-height:300px;overflow:auto"><table><tr><th>VALUE</th><th>STATUS</th><th>ACT</th></tr>${ph}</table></div></div></div>
+
+<div class="panel" id="panel-apis"><div class="sec"><h3>🔧 CUSTOM APIs (${customAPIs.length})</h3><div style="max-height:350px;overflow:auto"><table><tr><th>ID</th><th>NAME</th><th>ENDPOINT</th><th>PARAM</th><th>STATUS</th><th>ACT</th></tr>${ah}</table></div></div></div>
+
+<div class="panel" id="panel-addapi"><div class="sec"><h3>➕ ADD API</h3><div class="fgrid"><div><label>Name</label><input id="aname" placeholder="My API"></div><div><label>Endpoint</label><input id="aep" placeholder="my-api"></div><div><label>Param</label><input id="aparam" placeholder="num"></div><div><label>Example</label><input id="aex" placeholder="9876543210"></div><div style="grid-column:1/-1"><label>Real URL ({param})</label><input id="aurl" placeholder="https://api.com?param={param}"></div><div style="grid-column:1/-1"><button class="btn-ultra" onclick="addAPI()" style="width:100%">➕ ADD</button></div></div></div></div>
+
+<div class="panel" id="panel-io"><div class="sec"><h3>📦 IMPORT/EXPORT KEYS</h3><div style="margin-bottom:16px"><h4 style="color:#00ff88;margin-bottom:8px">📤 EXPORT</h4><textarea readonly id="exportData" onclick="this.select()">${exportJSON}</textarea><button class="btn-ultra" onclick="copyExport()" style="margin-top:8px">📋 COPY</button></div><div><h4 style="color:#00d4ff;margin-bottom:8px">📥 IMPORT</h4><textarea id="importData" placeholder="Paste JSON keys here..."></textarea><button class="btn-ultra" onclick="importKeys()" style="margin-top:8px">📥 IMPORT</button></div></div></div>
+
+<div class="panel" id="panel-settings"><div class="sec"><h3>⚙ SETTINGS</h3><button class="btn-ultra" onclick="resetAll()" style="width:100%;margin-bottom:10px">🔄 RESET ALL USAGE</button><button class="ab a-r" onclick="if(confirm('Delete ALL?'))deleteAllKeys()" style="width:100%;padding:12px">🗑 DELETE ALL KEYS</button></div></div>
+
+</div>
+<script>var TOKEN='${stoken}';
+function st(n){document.querySelectorAll('.panel').forEach(p=>p.classList.remove('on'));document.querySelectorAll('.tab').forEach(t=>t.classList.remove('on'));document.getElementById('panel-'+n).classList.add('on');event.target.classList.add('on')}
+function toggleAllScopes(){var cb=document.getElementById('scope-all');document.querySelectorAll('.scope-cb').forEach(s=>s.checked=cb.checked)}
+async function ac(u,b){var o={method:b?'POST':'GET',headers:{'Content-Type':'application/json','x-admin-token':TOKEN}};if(b)o.body=JSON.stringify(b);var r=await fetch(u,o);return await r.json()}
+async function gk(){var n=document.getElementById('gk').value.trim(),o=document.getElementById('go').value.trim();if(!n||!o){alert('Fill fields');return}var scopes=[];if(document.getElementById('scope-all').checked)scopes=['*'];else document.querySelectorAll('.scope-cb:checked').forEach(c=>scopes.push(c.value));var r=await ac('/admin/generate-key',{keyName:n,keyOwner:o,scopes:scopes,limit:document.getElementById('gl').value,dailyLimit:parseInt(document.getElementById('gdl').value)||0,days:parseInt(document.getElementById('gd').value)||30,cooldown:parseInt(document.getElementById('gc').value)||0});r.success?(alert('✅ Key: '+n),location.reload()):alert('❌ '+(r.e||'Error'))}
+async function resetKey(k){if(confirm('Reset?')){await ac('/admin/reset-key-usage',{keyName:k});location.reload()}}
+async function deleteKey(k){if(confirm('DELETE?')){await ac('/admin/delete-key',{keyName:k});location.reload()}}
+async function stopKey(k){if(!confirm('⛔ Stop/Activate: '+k+'?'))return;var r=await ac('/admin/stop-key',{keyName:k});r.success?(alert(r.stopped?'⛔ Stopped':'✅ Activated'),location.reload()):alert('❌ Error')}
+async function pushKey(k){var d=prompt('Days?','30');if(!d)return;var r=await ac('/admin/push-key',{keyName:k,days:parseInt(d)});r.success?(alert('✅ '+r.message),location.reload()):alert('❌ Error')}
+async function pushK(){var k=document.getElementById('pk').value.trim(),d=parseInt(document.getElementById('pd').value)||30;if(!k){alert('Enter key');return}var r=await ac('/admin/push-key',{keyName:k,days:d});r.success?(alert('✅ '+r.message),location.reload()):alert('❌ Error')}
+async function updateScopes(){var k=document.getElementById('sk').value.trim();if(!k){alert('Enter key');return}var scopes=[];if(document.getElementById('scope-all2').checked)scopes=['*'];else document.querySelectorAll('.scope-cb2:checked').forEach(c=>scopes.push(c.value));var r=await ac('/admin/update-scopes',{keyName:k,scopes:scopes});r.success?(alert('✅ Updated'),location.reload()):alert('❌ Error')}
+async function banIP2(){var ip=document.getElementById('bip').value.trim();if(!ip)return;await ac('/admin/ban-ip',{ip:ip});location.reload()}
+async function banIP(ip){await ac('/admin/ban-ip',{ip:ip});location.reload()}
+async function unbanIP(ip){await ac('/admin/unban-ip',{ip:ip});location.reload()}
+async function addProt(){var v=document.getElementById('protVal').value.trim();if(!v)return;var r=await ac('/admin/add-protection',{value:v});r.success?(alert(r.message),location.reload()):alert('❌ Error')}
+async function removeProt(v){if(!confirm('Remove?'))return;await ac('/admin/remove-protection',{value:v});location.reload()}
+async function clearLogs(){if(confirm('Clear?')){await ac('/admin/clear-logs');location.reload()}}
+async function resetAll(){if(confirm('Reset?')){await ac('/admin/reset-all');location.reload()}}
+async function deleteAllKeys(){document.querySelectorAll('button').forEach(b=>{if(b.textContent==='✕')b.click()});setTimeout(()=>location.reload(),1000)}
+async function addAPI(){var n=document.getElementById('aname').value.trim(),e=document.getElementById('aep').value.trim();if(!n||!e){alert('Fill name & endpoint');return}var r=await ac('/admin/add-api',{name:n,endpoint:e,param:document.getElementById('aparam').value,example:document.getElementById('aex').value,realAPI:document.getElementById('aurl').value,visible:true});r.success?(alert('✅ Added!'),location.reload()):alert('❌ Error')}
+async function toggleAPI(id){await ac('/admin/toggle-api',{id:id});location.reload()}
+async function deleteAPI(id){if(confirm('Delete?')){await ac('/admin/delete-api',{id:id});location.reload()}}
+function copyExport(){var ta=document.getElementById('exportData');ta.select();navigator.clipboard.writeText(ta.value);alert('📋 Copied!')}
+async function importKeys(){var d=document.getElementById('importData').value.trim();if(!d){alert('Paste JSON first!');return}try{var ks=JSON.parse(d);var r=await ac('/admin/import-keys',{keys:ks});r.success?(alert('✅ '+r.message),location.reload()):alert('❌ '+(r.e||'Error'))}catch(e){alert('❌ Invalid JSON!')}}
+</script></body></html>`;
+}catch(e){return `<html><body style="background:#000010;color:#ff0080;padding:30px"><h1>ERROR</h1><p>${e.message}</p></body></html>`}}
+
+function renderDocs(){return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>V15 DOCS</title><link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@400;500;600&display=swap" rel="stylesheet"><style>
+:root{--bg:#000010;--sur:rgba(5,5,30,.7);--brd:rgba(0,150,255,.08);--txt:#d0d8f0}*{margin:0;padding:0}body{background:var(--bg);color:var(--txt);font-family:'Rajdhani',sans-serif;min-height:100vh}
+.top{background:rgba(5,5,30,.9);border-bottom:1px solid var(--brd);padding:12px 24px;display:flex;justify-content:space-between;position:sticky;top:0;z-index:100}.top a{color:var(--txt);text-decoration:none;font-size:11px}
+.ct{max-width:1100px;margin:0 auto;padding:20px}.hero{text-align:center;padding:20px}.hero h1{font-family:'Orbitron',sans-serif;font-size:28px;background:linear-gradient(90deg,#0096ff,#8b00ff,#ff0080);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px}
+.card{background:var(--sur);border:1px solid var(--brd);border-radius:14px;padding:14px;transition:.3s}.card:hover{border-color:#0096ff}.method{background:rgba(0,150,255,.15);color:#0096ff;padding:2px 8px;border-radius:4px;font-size:10px}.card b{color:#fff;font-size:14px;margin-left:6px}.card p{color:#555;font-size:10px}
+code{display:block;background:rgba(0,0,20,.5);color:#00d4ff;padding:6px;border-radius:4px;font-size:9px;margin:6px 0;font-family:monospace}
+</style></head><body><div class="top"><a href="/">BRONX V15</a><a href="/">HOME</a><a href="/admin">ADMIN</a></div><div class="ct"><div class="hero"><h1>API DOCS V15 ULTRA</h1></div><div class="grid">${Object.entries(endpoints).map(([n,e])=>`<div class="card"><span class="method">GET</span><b>/${n}</b><p>${e.d}</p><code>GET /api/key-bronx/${n}?key=KEY&${e.p}=${e.e}</code></div>`).join('')}
+<div class="card" style="border-color:rgba(255,0,128,.2)"><span class="method" style="background:rgba(255,0,128,.2);color:#ff0080">🔒</span><b>/procted</b><p>Check/Add Protection</p><code>GET /api/key-bronx/procted?key=KEY&action=check&allprocted=9876543210</code><code style="margin-top:4px">GET /api/key-bronx/procted?key=KEY&action=add&allprocted=9876543210</code><code style="margin-top:4px">GET /api/key-bronx/procted?key=KEY&action=list</code></div>
+</div></div></body></html>`}
+
+function renderHome(){const vapi=customAPIs.filter(a=>a.visible);const tEP=Object.keys(endpoints).length+vapi.length;let cards='';Object.entries(endpoints).forEach(([n,e])=>{cards+=`<div class="ep" onclick="cp('${esc(n)}','${esc(e.p)}','${esc(e.e)}')"><span>${e.i}</span><b>/${esc(n)}</b><small>${e.d}</small><code>${e.p}=${e.e}</code></div>`});vapi.forEach(a=>{cards+=`<div class="ep" style="--ac:#8b00ff" onclick="ccp('${esc(a.endpoint)}','${esc(a.param)}','${esc(a.example)}')"><span>🔧</span><b>/${esc(a.endpoint)}</b><small>Custom</small><code>${a.param}=${a.example||'v'}</code></div>`});return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>BRONX OSINT V15</title><link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;400;600;700&display=swap" rel="stylesheet"><style>
+:root{--bg:#000010;--sur:rgba(5,5,30,.6);--brd:rgba(0,150,255,.06);--txt:#d0d8f0}
+*{margin:0;padding:0;box-sizing:border-box}body{background:var(--bg);color:var(--txt);font-family:'Rajdhani',sans-serif;overflow-x:hidden;font-size:14px}
+body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellipse at 50% 0%,rgba(0,150,255,.06),transparent 60%),radial-gradient(ellipse at 80% 100%,rgba(139,0,255,.04),transparent 50%);pointer-events:none;z-index:0}
+nav{position:sticky;top:0;z-index:1000;background:rgba(0,0,16,.9);border-bottom:1px solid var(--brd);padding:12px 24px;display:flex;justify-content:space-between;align-items:center;backdrop-filter:blur(40px)}
+nav .logo{font-family:'Orbitron',sans-serif;font-size:14px;background:linear-gradient(90deg,#0096ff,#8b00ff,#ff0080,#ffb400);background-size:300% 100%;-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-weight:900;animation:rainbowText 3s linear infinite}@keyframes rainbowText{0%{background-position:0% 50%}100%{background-position:300% 50%}}
+nav a{color:#555;text-decoration:none;font-size:10px;font-weight:600}nav a:hover{color:#0096ff}
+.hero{text-align:center;padding:40px 20px 20px}.hero h1{font-size:clamp(36px,8vw,56px);font-weight:900;background:linear-gradient(90deg,#0096ff,#8b00ff,#ff0080,#ffb400,#00ff88);background-size:400% 100%;-webkit-background-clip:text;-webkit-text-fill-color:transparent;animation:rainbowText 4s linear infinite;font-family:'Orbitron',sans-serif}
+.hero .sub{color:#444;font-size:12px;letter-spacing:4px;margin-top:4px}
+.container{max-width:1200px;margin:0 auto;padding:0 20px 40px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px}
+.ep{background:var(--sur);border:1px solid var(--brd);border-radius:14px;padding:16px;cursor:pointer;border-top:2px solid var(--ac,#0096ff);transition:.3s;backdrop-filter:blur(30px)}.ep:hover{transform:translateY(-4px);box-shadow:0 20px 50px rgba(0,0,0,.6)}.ep span{font-size:20px}.ep b{font-size:14px;color:#fff}.ep small{font-size:9px;color:#555;display:block;margin:4px 0 8px}.ep code{font-size:8px;color:var(--ac,#0096ff);background:rgba(0,0,20,.5);padding:3px 6px;border-radius:4px;font-family:monospace}
+footer{text-align:center;padding:20px;border-top:1px solid var(--brd)}footer .fb{font-size:16px;font-weight:900;background:linear-gradient(90deg,#0096ff,#8b00ff,#ff0080);-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-family:'Orbitron',sans-serif}
+</style></head><body><nav><a href="/" class="logo">🌈 BRONX V15</a><div><a href="/docs">DOCS</a> <a href="/admin">ADMIN</a></div></nav><header class="hero"><h1>BRONX OSINT V15 ULTRA</h1><p class="sub">Protected API · Import/Export · Fake IP · Rainbow 3D/4D</p></header><div class="container"><div class="grid">${cards}</div></div><footer><p class="fb">BRONX OSINT V15 ULTRA 🌈</p></footer><script>var eps=${JSON.stringify(endpoints)};function cp(n,p,e){navigator.clipboard.writeText(location.origin+'/api/key-bronx/'+n+'?key=KEY&'+p+'='+e)}function ccp(n,p,e){navigator.clipboard.writeText(location.origin+'/api/custom/'+n+'?key=KEY&'+p+'='+(e||'v'))}</script></body></html>`}
+
+const PORT = process.env.PORT || 3000;
+(async function(){initHardcodedKeys();if(!loadFromDisk()){if(customAPIs.length===0)initCustomAPIs()}if(!keyStorage[MASTER_API_KEY])keyStorage[MASTER_API_KEY]=createMasterKey();scheduleSave();app.listen(PORT,()=>{console.log('🌈 BRONX OSINT V15 ULTRA ONLINE!');console.log('🔒 Protected API: /api/key-bronx/procted');console.log('📦 Import/Export Keys');console.log('🚀 PORT: '+PORT)})})();
+module.exports = app;
